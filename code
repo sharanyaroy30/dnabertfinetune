@@ -1,0 +1,89 @@
+# ===== 1. SETUP: Install correct PyTorch, Transformers, Triton =====
+!pip uninstall -y torch torchvision torchaudio transformers triton
+!pip install torch==2.0.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+!pip install transformers==4.33.1 datasets accelerate triton==2.0.0
+
+# ===== 2. IMPORTS =====
+import os
+import pandas as pd
+import torch
+from datasets import Dataset
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
+
+# ===== 3. UPLOAD your CSV file =====
+from google.colab import files
+uploaded = files.upload()  # Upload your CSV here (e.g. 'GSE61888_nucs_normed.csv')
+
+# ===== 4. LOAD CSV into pandas =====
+csv_filename = list(uploaded.keys())[0]
+df = pd.read_csv(csv_filename)
+
+# ===== 5. DATA PREPROCESSING =====
+# Assuming 'Unnamed: 2' column is the genomic center (coordinate),
+# and we extract ±75bp sequences from a dummy genome string for example.
+# Replace this mock genome with your actual genome FASTA data or another method.
+
+mock_genome = "ACGT" * 10**6  # 4 million bases, example only
+
+def extract_sequence(center, window=75):
+    try:
+        center = int(center)
+        start = max(0, center - window - 1)  # 0-based indexing
+        end = start + 2*window + 1
+        return mock_genome[start:end]
+    except:
+        return ""  # empty string for invalid positions
+
+df['sequence'] = df['Unnamed: 2'].apply(extract_sequence)
+
+# Create a binary label column: Example - label = 1 if a certain condition met
+# You must adjust this depending on your dataset columns and task
+df['label'] = (df['Unnamed: 2'] > 100000).astype(int)  # Dummy example condition
+
+# ===== 6. PREPARE DATASET FOR TRANSFORMERS =====
+dataset = Dataset.from_pandas(df[['sequence', 'label']].dropna())
+
+# ===== 7. LOAD DNABERT-2 TOKENIZER AND MODEL =====
+model_name = "zhihan1996/DNABERT-2-117M"
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2, trust_remote_code=True)
+
+# ===== 8. TOKENIZE DATA =====
+def tokenize_function(examples):
+    return tokenizer(examples["sequence"], truncation=True, padding="max_length", max_length=151)  # 151 = 2*75 +1
+
+tokenized_dataset = dataset.map(tokenize_function, batched=True)
+
+# ===== 9. SET TRAINING ARGUMENTS =====
+training_args = TrainingArguments(
+    output_dir="./dnabert_finetuned",
+    evaluation_strategy="epoch",
+    learning_rate=5e-5,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=16,
+    num_train_epochs=3,
+    weight_decay=0.01,
+    save_total_limit=2,
+    load_best_model_at_end=True,
+    logging_dir='./logs',
+    logging_steps=10,
+    push_to_hub=False,
+    report_to="none"  # disable wandb logging, you can enable if you want
+)
+
+# ===== 10. CREATE TRAINER INSTANCE =====
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_dataset,
+    eval_dataset=tokenized_dataset,  # replace with real eval split if you have one
+    tokenizer=tokenizer,
+)
+
+# ===== 11. TRAIN THE MODEL =====
+trainer.train()
+
+# ===== 12. SAVE THE FINETUNED MODEL =====
+trainer.save_model("./dnabert_finetuned_final")
+
+print("Finetuning complete! Model saved to ./dnabert_finetuned_final")
